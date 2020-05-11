@@ -7,6 +7,7 @@ import ssl
 import traceback
 from functools import partial
 from pathlib import Path
+from typing import Mapping, Optional
 
 from irclib.parser import Message
 
@@ -34,6 +35,36 @@ irc_command_to_event_type = {
     "NOTICE": EventType.notice
 }
 
+content_params = {
+    "PRIVMSG": 1,
+    "NOTICE": 1,
+    "PART": 1,
+    "KICK": 2,
+    "TOPIC": 1,
+    "NICK": 0,
+    "QUIT": 0,
+}
+
+chan_params = {
+    "PRIVMSG": 0,
+    "NOTICE": 0,
+    "JOIN": 0,
+    "PART": 0,
+    "TOPIC": 0,
+    "MODE": 0,
+    "KICK": 0,
+    "INVITE": 1,
+    "353": 2,
+    "366": 1,
+    "324": 1,
+}
+
+target_params = {
+    "KICK": 1,
+    "INVITE": 0,
+    "MODE": 0,
+}
+
 
 def decode(bytestring):
     """
@@ -45,6 +76,15 @@ def decode(bytestring):
         except UnicodeDecodeError:
             continue
     return bytestring.decode('utf-8', errors='ignore')
+
+
+def _get_param(msg: Message, index_map: Mapping[str, int]) -> Optional[str]:
+    if msg.command in index_map:
+        idx = index_map[msg.command]
+        if idx < len(msg.parameters):
+            return msg.parameters[idx]
+
+    return None
 
 
 @client("irc")
@@ -429,18 +469,17 @@ class _IrcProtocol(asyncio.Protocol):
             command_params = message.parameters
 
             # Reply to pings immediately
-
             if command == "PING":
                 self.conn.send("PONG " + command_params[-1], log=False)
 
             # Parse the command and params
 
             # Content
-            if command_params.has_trail:
-                content_raw = command_params[-1]
+            content_raw = _get_param(message, content_params)
+
+            if content_raw is not None:
                 content = irc_clean(content_raw)
             else:
-                content_raw = None
                 content = None
 
             # Event type
@@ -448,14 +487,7 @@ class _IrcProtocol(asyncio.Protocol):
                 command, EventType.other
             )
 
-            # Target (for KICK, INVITE)
-            if event_type is EventType.kick:
-                target = command_params[1]
-            elif command in ("INVITE", "MODE"):
-                target = command_params[0]
-            else:
-                # TODO: Find more commands which give a target
-                target = None
+            target = _get_param(message, target_params)
 
             # Parse for CTCP
             if event_type is EventType.message and content_raw.startswith("\x01"):
@@ -484,14 +516,7 @@ class _IrcProtocol(asyncio.Protocol):
                 ctcp_text = None
 
             # Channel
-            channel = None
-            if command_params:
-                if command in ["NOTICE", "PRIVMSG", "KICK", "JOIN", "PART", "MODE"]:
-                    channel = command_params[0]
-                elif command == "INVITE":
-                    channel = command_params[1]
-                elif len(command_params) > 2 or not (command_params.has_trail and len(command_params) == 1):
-                    channel = command_params[0]
+            channel = _get_param(message, chan_params)
 
             prefix = message.prefix
 
@@ -512,6 +537,7 @@ class _IrcProtocol(asyncio.Protocol):
 
                 channel = channel.split()[0]  # Just in case there is more data
 
+                # Channel for a PM is the sending user
                 if channel == self.conn.nick.lower():
                     channel = nick.lower()
 
